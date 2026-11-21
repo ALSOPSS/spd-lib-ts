@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Crypto dependencies get their own group so a bump is reviewed on its own;
+    # a supply-chain compromise most often ships as a fresh minor/patch.
+    groups:
+      noble-crypto:
+        patterns: ["@noble/*", "hash-wasm", "argon2"]
+      dev-tooling:
+        dependency-type: development
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

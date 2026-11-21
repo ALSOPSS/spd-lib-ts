@@ -1,0 +1,109 @@
+{
+  "name": "spd-lib",
+  "version": "2.1.1",
+  "description": "SPD (Secure Packaged Data) — a compressed, post-quantum-hardened encrypted data format, portable across Node.js, browsers, Deno, and Bun. Supports chunked internet transfer, large-file streaming (>2 GB), Argon2id key derivation, XChaCha20-Poly1305 AEAD, and HMAC-SHA3-512 authentication.",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "browser": "./dist/browser.js",
+      "import": "./dist/browser.js"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "import": "./dist/web.js"
+    },
+    "./score": {
+      "types": "./dist/score.d.ts",
+      "import": "./dist/score.js"
+    }
+  },
+  "sideEffects": false,
+  "typesVersions": {
+    "*": {
+      "browser": [
+        "./dist/browser.d.ts"
+      ],
+      "web": [
+        "./dist/web.d.ts"
+      ],
+      "score": [
+        "./dist/score.d.ts"
+      ]
+    }
+  },
+  "bin": {
+    "spd-inspect": "dist/spd-inspect.js",
+    "spd-score": "dist/spd-score-cli.js"
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean && tsup src/web.ts --format esm --dts --no-clean && tsup src/score.ts --format esm --dts --no-clean && tsup src/spd-encrypt-worker.ts --format esm --no-dts --no-clean --out-dir dist && tsup src/spd-inspect.ts --format esm --no-dts --no-clean --out-dir dist && tsup src/spd-score.ts --format esm --no-dts --no-clean --out-dir dist && tsup src/spd-score-cli.ts --format esm --no-dts --no-clean --out-dir dist && SPD_BUILD_TARGET=browser tsup src/browser.ts --format esm --dts --no-clean && node scripts/post-build.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npx vitest run --maxWorkers=2 && npm run build",
+    "inspect": "node dist/spd-inspect.js",
+    "score": "node dist/spd-score-cli.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "security",
+    "encryption",
+    "post-quantum",
+    "pqc",
+    "argon2",
+    "xchacha20",
+    "data-storage",
+    "persistent",
+    "crypto",
+    "compression",
+    "chunked-upload",
+    "streaming",
+    "file",
+    "nodejs",
+    "browser",
+    "cross-platform",
+    "zlib",
+    "typescript"
+  ],
+  "author": "spd-lib contributors",
+  "license": "ISC",
+  "homepage": "https://alsopss.com/products#spd-lib",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@noble/post-quantum": "^0.7.1",
+    "hash-wasm": "^4.12.0"
+  },
+  "optionalDependencies": {
+    "argon2": "^0.44.0"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/node": "^20.19.0",
+    "fast-check": "^4.10.2",
+    "libsodium-wrappers": "^0.8.2",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ALSOPSS/spd-lib-ts.git"
+  }
+}

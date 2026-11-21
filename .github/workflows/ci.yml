@@ -1,0 +1,215 @@
+name: CI
+
+# Runs on a Node version matrix to catch exactly the class of bug found
+# during this project's own compatibility audit: this repo's dev machine
+# runs Node 20.13.1 (below the package's own documented >=20.19.0 floor) and
+# every test still passed locally — meaning a real floor violation would
+# have gone unnoticed without CI actually enforcing it on the documented
+# minimum. `engines.node` in package.json is the source of truth for the
+# versions here; keep them in sync if that ever changes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20.19.0 = the documented engines.node floor (must not silently
+        # regress); latest LTS and latest current are the versions real
+        # consumers are most likely actually running.
+        node-version: ['20.19.0', '22.x', '24.x']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        # KDF-heavy tests (high/paranoid Argon2id profiles) have a real,
+        # documented timing margin issue under contention — this repo's own
+        # dev machine sometimes needed 45-65s for a single such test under
+        # load (still within the 60s-per-test default, but close). Capping
+        # worker parallelism trades total wall-clock time for a lower risk
+        # of every worker fighting for CPU at once on a shared CI runner
+        # (verified flag: `vitest run --help` lists --maxWorkers; no such
+        # env var as VITEST_MAX_THREADS actually exists — checked directly
+        # rather than assumed, since inventing one here would silently do
+        # nothing).
+        run: npx vitest run --maxWorkers=2
+
+      - name: Security score (must stay 100/100)
+        run: npm run score -- src/
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify registry signatures and provenance attestations of installed packages
+        run: npm audit signatures
+
+      - name: Software bill of materials (CycloneDX)
+        if: matrix.node-version == '22.x'
+        run: npm sbom --sbom-format cyclonedx --omit dev > sbom.cdx.json
+
+      - name: Upload SBOM
+        if: matrix.node-version == '22.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+
+      - name: Package manifest lint (publint + are-the-types-wrong)
+        if: matrix.node-version == '22.x'
+        run: |
+          npx -y publint --strict
+          npx -y @arethetypeswrong/cli --pack . --ignore-rules cjs-resolves-to-esm no-resolution
+
+  browser-build:
+    name: Browser build sanity check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Bundle a real consumer entry point with esbuild
+        # Mirrors how an actual browser consumer (webpack/vite/esbuild) would
+        # bundle this package — NOT a bare <script type="module"> load, which
+        # cannot resolve node_modules bare specifiers (dependencies like
+        # fflate) without a bundler.
+        run: |
+          cat > /tmp/browser-smoke-entry.mjs <<'EOF'
+          import { SPD } from './dist/browser.js';
+          async function run() {
+            try {
+              const spd = new SPD();
+              spd.setKeyProfile('standard');
+              await spd.setPassKey('CiBrowserSmoke!Test#2024word');
+              await spd.addData('greeting', 'hello from CI headless Chrome');
+              const data = await spd.extractData();
+              const ok = data.greeting === 'hello from CI headless Chrome';
+
+              const secret = SPD.generateRandomKey();
+              const spd2 = new SPD();
+              await spd2.setRandomKey(secret);
+              await spd2.addData('k', 'keyless-in-ci-browser');
+              const data2 = await spd2.extractData();
+              const str = await spd2.saveData('');
+              const back = await SPD.loadStringWithRandomKey(str, secret);
+              const keylessOk = data2.k === 'keyless-in-ci-browser' && (await back.extractData()).k === 'keyless-in-ci-browser';
+
+              const { SPDRecipient, SPDShamir } = await import('./dist/browser.js');
+              const id = SPDRecipient.generateIdentity();
+              const opened = SPDRecipient.open(SPDRecipient.seal(secret, [id.publicKey]), id.secretKey);
+              const sh = SPDShamir.split(secret, 3, 2);
+              const back = SPDShamir.combine([sh[1], sh[2]]);
+              const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+              const pqOk = same(opened, secret) && same(back, secret);
+
+              console.log('RESULT:' + JSON.stringify({ ok, keylessOk, pqOk, PASS: ok && keylessOk && pqOk }));
+            } catch (e) {
+              console.log('RESULT:' + JSON.stringify({ ok: false, error: String(e), stack: e.stack }));
+            }
+          }
+          run();
+          EOF
+          npx esbuild /tmp/browser-smoke-entry.mjs --bundle --format=esm --platform=browser --outfile=browser-smoke-bundled.js
+
+      - name: Bundle-size budget (spd-lib/browser, deps external)
+        run: node scripts/bundle-size.mjs --check
+
+      - name: Run the bundled build in real headless Chrome
+        # Actual runtime execution, not just a build check — this is the
+        # step that would have caught the SharedArrayBuffer-global-absence
+        # crash found during this repo's own compatibility audit (a plain
+        # bundle-time check cannot catch it; it only manifests when the
+        # code actually runs in a browser with no COOP/COEP isolation
+        # headers, which is deliberately what this step reproduces — no
+        # special headers are set here, matching the common real-world case).
+        run: |
+          cat > browser-smoke.html <<'EOF'
+          <!DOCTYPE html><html><body>
+          <script type="module" src="/browser-smoke-bundled.js"></script>
+          </body></html>
+          EOF
+          # Plain Node http server (no extra package to resolve) — same
+          # approach used to manually verify this locally during development.
+          node -e "
+            const http = require('http');
+            const fs = require('fs');
+            const path = require('path');
+            http.createServer((req, res) => {
+              const p = path.join(process.cwd(), req.url === '/' ? '/browser-smoke.html' : req.url);
+              fs.readFile(p, (err, data) => {
+                if (err) { res.writeHead(404); res.end(); return; }
+                const ext = path.extname(p);
+                const type = ext === '.js' ? 'text/javascript' : ext === '.html' ? 'text/html' : 'text/plain';
+                res.writeHead(200, { 'Content-Type': type });
+                res.end(data);
+              });
+            }).listen(8931);
+          " &
+          sleep 1
+          OUTPUT=$(google-chrome --headless=new --disable-gpu --no-sandbox \
+            --virtual-time-budget=10000 --enable-logging=stderr --v=1 \
+            http://localhost:8931/browser-smoke.html 2>&1 || true)
+          echo "$OUTPUT" | grep -i "CONSOLE" || true
+          RESULT_LINE=$(echo "$OUTPUT" | grep -o 'RESULT:{[^}]*}[^"]*' | head -1 || true)
+          if [ -z "$RESULT_LINE" ]; then
+            echo "::error::No RESULT line found in Chrome console output — the module likely failed to load or crashed before logging."
+            exit 1
+          fi
+          echo "Got: $RESULT_LINE"
+          echo "$RESULT_LINE" | grep -q '"PASS":true' || { echo "::error::Browser round-trip did not report PASS:true"; exit 1; }
+
+  runtimes:
+    name: Built package under Bun and Deno
+    # The package claims Node / browsers / Deno / Bun. This runs the real
+    # built artefact under the two non-Node runtimes (in-memory keyless path,
+    # recipients, Shamir) — the check that caught keyless string persistence
+    # being broken everywhere.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - uses: oven-sh/setup-bun@v2
+      - name: Bun
+        run: bun bench/runtime-smoke.mjs
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Deno
+        run: deno run -A bench/runtime-smoke.mjs
